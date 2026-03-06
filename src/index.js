@@ -1,3 +1,4 @@
+
 import { PDFDocument } from 'pdf-lib';
 
 export default {
@@ -16,35 +17,59 @@ export default {
 
     const { pdf_base64, pages } = body;
     if (!pdf_base64) return error('Missing pdf_base64');
-    if (!Array.isArray(pages) || pages.length === 0) return error('Missing pages array');
+    if (!Array.isArray(pages) || pages.length === 0) return error('Missing pages array (e.g. [1,2,3])');
 
+    // Decode base64 → bytes
     let pdfBytes;
-    try { pdfBytes = Uint8Array.from(atob(pdf_base64), c => c.charCodeAt(0)); }
-    catch { return error('Invalid base64'); }
+    try {
+      const binary = atob(pdf_base64);
+      pdfBytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) {
+        pdfBytes[i] = binary.charCodeAt(i);
+      }
+    } catch {
+      return error('Invalid base64 data');
+    }
 
+    // Load source PDF
     let srcDoc;
     try { srcDoc = await PDFDocument.load(pdfBytes); }
     catch (e) { return error('Failed to load PDF: ' + e.message); }
 
     const totalPages = srcDoc.getPageCount();
-    const invalid = pages.filter(p => p < 1 || p > totalPages);
+
+    // Validate page numbers (1-based)
+    const invalid = pages.filter(p => !Number.isInteger(p) || p < 1 || p > totalPages);
     if (invalid.length > 0) {
-      return error('Pages out of range: ' + invalid.join(', ') + ' (PDF has ' + totalPages + ' pages)');
+      return error('Pages out of range: [' + invalid.join(', ') + ']. PDF has ' + totalPages + ' pages.');
     }
 
+    // Build new PDF with only requested pages
     const newDoc = await PDFDocument.create();
-    const copied = await newDoc.copyPages(srcDoc, pages.map(p => p - 1));
-    copied.forEach(p => newDoc.addPage(p));
+    const indices = pages.map(p => p - 1); // convert to 0-based
+    const copied  = await newDoc.copyPages(srcDoc, indices);
+    copied.forEach(page => newDoc.addPage(page));
 
-    const newBytes  = await newDoc.save();
-    const newBase64 = btoa(String.fromCharCode(...new Uint8Array(newBytes)));
+    // Serialize to bytes
+    const newBytes = await newDoc.save();
+
+    // Safe base64 encode (avoids stack overflow on large files)
+    let newBase64 = '';
+    const chunk  = 8192;
+    for (let i = 0; i < newBytes.length; i += chunk) {
+      newBase64 += String.fromCharCode(...newBytes.subarray(i, i + chunk));
+    }
+    newBase64 = btoa(newBase64);
 
     return new Response(JSON.stringify({
       success:    true,
       pages_in:   pages,
       pages_out:  newDoc.getPageCount(),
+      total_size_kb: Math.round(newBytes.length / 1024),
       pdf_base64: newBase64
-    }), { headers: { 'Content-Type': 'application/json', ...corsHeaders() } });
+    }), {
+      headers: { 'Content-Type': 'application/json', ...corsHeaders() }
+    });
   }
 };
 
